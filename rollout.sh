@@ -2,8 +2,8 @@
 # AX rollout: a staged production deployment as a tree of AX Tasks.
 #
 #   canary                    1% of traffic, then bake
-#   └── gate-check-1          may it go to a production cell?
-#       └── prod-cell-1       one production cell, then bake
+#   └── gate-check-1          may it go to production?
+#       └── us-central        the first production region, then bake
 #           └── gate-check-2  may it go to every region?
 #               ├── us-east ────┐    fan out to three regions at once
 #               ├── eu-west ────┼── validate   last step, once all three
@@ -15,6 +15,14 @@
 # checks the release as a whole. All stages are created up front and stay
 # Suspended (pending) until all of their parents report DONE; `run` is the
 # controller that resumes them. A failed check stops everything below it.
+#
+# Every task has its own identity (its Substrate actor) and its own policy:
+#   - a Gateway, installed as the egress policy of that actor. A deploy reaches
+#     only its own region's endpoint, a gate only the approvals API, validate
+#     only the metrics API. Anything else is refused.
+#   - CPU and memory limits on its sandbox.
+# On start every stage proves its policy: it calls the host it is allowed to
+# reach and one it is not, and records both results in /workspace/policy.
 #
 # Each stage writes its progress to /workspace/status and reads
 # /workspace/inbox between steps. Steering reaches a stage and every stage
@@ -33,7 +41,7 @@
 #   ./rollout.sh run                    start stages as their parents finish
 #   ./rollout.sh steer <stage> <msg>    e.g. steer canary rollback
 #   ./rollout.sh status                 show every stage
-#   ./rollout.sh down                   delete every stage
+#   ./rollout.sh down                   delete every stage and its gateway
 #
 # Environment:
 #   AX_BIN            ax CLI                    (default: ax)
@@ -60,9 +68,9 @@ ax() { "${AX_BIN}" -a "${ATESPACE}" "$@"; }
 # several parents (comma-separated) starts once all of them are DONE.
 TREE=(
   "canary        -                           deploy    1% of traffic"
-  "gate-check-1  canary                      gate      cell prod-1"
-  "prod-cell-1   gate-check-1                deploy    cell prod-1"
-  "gate-check-2  prod-cell-1                 gate      every region"
+  "gate-check-1  canary                      gate      us-central"
+  "us-central    gate-check-1                deploy    us-central"
+  "gate-check-2  us-central                  gate      every region"
   "us-east       gate-check-2                deploy    us-east"
   "eu-west       gate-check-2                deploy    eu-west"
   "asia-south    gate-check-2                deploy    asia-south"
@@ -79,6 +87,43 @@ goal_of() {
     validate) echo "validate ${TO} across $(scope_of "$1")" ;;
     gate)     echo "may ${TO} go to $(scope_of "$1")?" ;;
     *)        echo "deploy ${TO} to $(scope_of "$1")" ;;
+  esac
+}
+
+# Policy. region_of maps a deploy to its cloud region, whose endpoint is the
+# only host its gateway allows.
+region_of() {
+  case "$1" in
+    canary | us-central) echo us-central1 ;;
+    us-east) echo us-east1 ;;
+    eu-west) echo europe-west1 ;;
+    asia-south) echo asia-south1 ;;
+  esac
+}
+
+# allow_of prints the host a stage's gateway lets it reach; deny_of, a host it
+# must not reach (another region, or for checks, any deploy endpoint).
+allow_of() {
+  case "$(kind_of "$(row_of "$1")")" in
+    gate) echo api.github.com ;;
+    validate) echo monitoring.googleapis.com ;;
+    *) echo "$(region_of "$1")-run.googleapis.com" ;;
+  esac
+}
+deny_of() {
+  case "$(kind_of "$(row_of "$1")")/$(region_of "$1")" in
+    deploy/europe-west1) echo us-central1-run.googleapis.com ;;
+    deploy/*) echo europe-west1-run.googleapis.com ;;
+    *) echo us-central1-run.googleapis.com ;;
+  esac
+}
+
+# limits_of prints the CPU and memory limits of a stage's sandbox.
+limits_of() {
+  case "$(kind_of "$(row_of "$1")")" in
+    gate) echo "500m 256Mi" ;;
+    validate) echo "2 1Gi" ;;
+    *) echo "1 512Mi" ;;
   esac
 }
 
@@ -192,7 +237,19 @@ check() {
   log "DONE: all checks passed"
 }
 
-report STARTING 0 "starting"
+# probe checks the task's egress policy from inside the sandbox.
+probe() {
+  if code=$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "https://$1/" 2>/dev/null); then
+    echo "reached (HTTP $code)"
+  else
+    echo blocked
+  fi
+}
+
+report STARTING 0 "checking policy"
+a=$(probe "$ALLOW") d=$(probe "$DENY")
+printf 'allow %s %s\ndeny %s %s\n' "$ALLOW" "$a" "$DENY" "$d" > policy
+log "POLICY: $ALLOW $a; $DENY $d"
 log "started: $KIND $SCOPE (parent: ${PARENT:-none})"
 if [ "$KIND" = deploy ]; then
   if deploy; then
@@ -206,11 +263,23 @@ while true; do sleep 3600; done
 SH
 
 manifest() {
-  local row name parent
+  local row name parent limits image=""
+  [[ -n "$TASK_IMAGE" ]] && image=$'\n    image: "'"$TASK_IMAGE"'"'
   for row in "${TREE[@]}"; do
     name=$(name_of "$row"); parent=$(parent_of "$row")
     [[ "$parent" == "-" ]] && parent=""
+    limits=($(limits_of "$name"))
     cat <<YAML
+---
+apiVersion: ax.io/v1alpha1
+kind: Gateway
+metadata:
+  name: gw-${name}
+  atespace: ${ATESPACE}
+spec:
+  egress:
+    - https:
+        hostnames: ["$(allow_of "$name")"]
 ---
 apiVersion: ax.io/v1alpha1
 kind: Task
@@ -222,6 +291,10 @@ metadata:
     ax.io/parent: "${parent//,/.}"
 spec:
   debug: true # steering goes through ax ssh
+  gateway: {name: gw-${name}}
+  profile:${image}
+    resources:
+      limits: {cpu: "${limits[0]}", memory: "${limits[1]}"}
   commands:
     - sh
     - -c
@@ -236,10 +309,9 @@ $(sed 's/^/      /' <<<"$AGENT")
     - {name: TO, value: "${TO}"}
     - {name: TICK, value: "${TICK}"}
     - {name: FAIL, value: "$([[ "$name" == "$FAIL" ]] && echo 1)"}
+    - {name: ALLOW, value: "$(allow_of "$name")"}
+    - {name: DENY, value: "$(deny_of "$name")"}
 YAML
-    if [[ -n "$TASK_IMAGE" ]]; then
-      printf '  profile:\n    image: "%s"\n' "$TASK_IMAGE"
-    fi
   done
 }
 
@@ -329,8 +401,11 @@ run() {
 
 up() {
   if [[ -n "${AX_LEGACY_SCHEMA:-}" ]]; then
-    # Servers built before #587 know neither labels nor `commands`.
-    manifest | sed -e '/^  labels:/d' -e '/ax\.io\//d' -e 's/^  commands:/  command:/' | ax apply -f -
+    # Servers built before #587 know neither labels nor `commands`, and take
+    # image and resources directly under spec.
+    manifest | sed -E -e '/^  labels:/d' -e '/^    ax\.io\//d' -e 's/^  commands:/  command:/' \
+      -e '/^  profile:$/d' -e 's/^    (image|resources):/  \1:/' -e 's/^      limits:/    limits:/' |
+      ax apply -f -
   else
     manifest | ax apply -f -
   fi
@@ -399,6 +474,7 @@ down() {
   local i
   for ((i = ${#TREE[@]} - 1; i >= 0; i--)); do
     ax delete task "$(name_of "${TREE[i]}")" 2>/dev/null || true
+    ax delete gateway "gw-$(name_of "${TREE[i]}")" 2>/dev/null || true
   done
 }
 

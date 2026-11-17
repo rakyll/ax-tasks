@@ -40,7 +40,7 @@
   #edges path.flow { stroke: var(--steer); stroke-dasharray: 6 6; animation: flow .6s linear infinite; }
   @keyframes flow { to { stroke-dashoffset: -12; } }
 
-  .node { position: absolute; width: 210px; background: var(--card); border: 1px solid var(--line);
+  .node { position: absolute; width: 230px; background: var(--card); border: 1px solid var(--line);
           border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: border-color .2s, box-shadow .2s, opacity .3s; }
   .node:hover { border-color: #54474d; }
   .node.selected { border-color: #fff; }
@@ -50,7 +50,7 @@
   .node.idle { opacity: .5; }
   .node.idle:hover { opacity: .8; }
   .node.failed { border-color: var(--err); }
-  .node.compact { width: 170px; }
+  .node.compact { width: 180px; }
   .node .top .pill { margin-left: auto; }
   .node .top { display: flex; align-items: center; gap: 6px; }
   .node .top { flex-wrap: wrap; }
@@ -80,6 +80,8 @@
   .ident { font-family: var(--mono); font-size: 10.5px; color: var(--faint); border-top: 1px dashed var(--line);
            padding-top: 6px; margin-top: 2px; line-height: 1.5; }
   .ident b { color: var(--dim); font-weight: 500; }
+  .ident.grid { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; }
+  .ident span { overflow-wrap: anywhere; }
   .log { font-family: var(--mono); font-size: 11px; color: var(--dim); background: #141113;
          border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; }
   .log div + div { margin-top: 3px; }
@@ -130,7 +132,7 @@
 <script>
 const HGAP = 30, VGAP = 22;
 // Gates get narrower boxes than deploys, so the long chain fits.
-const width = n => n.kind === "gate" ? 170 : 210;
+const width = n => n.kind === "gate" ? 180 : 230;
 const $ = id => document.getElementById(id);
 let nodes = [], selected = null, busy = null, presets = null;
 // pending[name] = {msg, seen}: a steering message on its way to that task,
@@ -205,10 +207,21 @@ function action(n) {
     : `<button class="act" data-op="resume" title="ax resume task ${esc(n.name)}">▶ resume</button>`;
 }
 
+// identity is the task's own actor and the policy AX applied to it: the
+// gateway that is its egress policy, and its sandbox limits.
+function identity(n, id) {
+  const where = id.worker && isRunning(n.state) ? `worker ${id.worker}` : "";
+  return `
+      <b>actor</b><span title="${esc(where)}">${esc(id.actor)}</span>
+      <b>uid</b><span>${esc(id.actorUid.slice(0, 8) || "–")}</span>
+      <b>egress</b><span>${esc(id.gateway || "none")}</span>
+      <b>limits</b><span>${id.cpu ? `${esc(id.cpu)} cpu · ${esc(id.memory)}` : "default"}</span>`;
+}
+
 function card(n, targets) {
   const ph = phase(n), tone = TONE[ph] || "", st = n.status, id = n.identity;
   const el = document.createElement("div");
-  el.className = ["node", width(n) < 210 && "compact", n.name === selected && "selected", targets.has(n.name) && "target",
+  el.className = ["node", width(n) < 230 && "compact", n.name === selected && "selected", targets.has(n.name) && "target",
                   pending[n.name] && "pending", ["ABSENT", "PENDING", "SKIPPED", "SUSPENDED"].includes(ph) && "idle",
                   ph === "FAILED" && "failed"].filter(Boolean).join(" ");
   const chips = n.steer.map((s, i) => {
@@ -225,10 +238,7 @@ function card(n, targets) {
     ${st ? `<div class="detail ${tone === "bad" ? "bad" : ""}">${esc(st.detail)}</div>` : ""}
     ${log ? `<div class="log">${log}</div>` : ""}
     <div class="chips">${chips}</div>
-    <div class="ident">${id ? `
-      <div><b>actor uid</b> ${esc(id.actorUid.slice(0, 8) || "–")}${id.worker && isRunning(n.state) ? ` · <b>worker</b> ${esc(id.worker)}` : ""}</div>`
-      : `<div>no actor yet · ${esc(n.state === "Absent" ? "task not created" : "task " + n.state.toLowerCase())}</div>`}
-    </div>`;
+    <div class="ident${id ? " grid" : ""}">${id ? identity(n, id) : `<div>${n.state === "Absent" ? "task not created" : "reading identity…"}</div>`}</div>`;
   el.onclick = () => { selected = n.name; render(); };
   const btn = el.querySelector("button[data-op]");
   if (btn) btn.onclick = e => { e.stopPropagation(); suspendResume(n, btn.dataset.op); };

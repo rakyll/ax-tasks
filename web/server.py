@@ -84,11 +84,17 @@ def poll_states():
 
 
 def poll_identity(name):
+    """The task's identity (its Substrate actor) and the policy AX applied to it."""
     code, out = run([AX_BIN, "-a", ATESPACE, "get", "task", name], timeout=30)
     if code != 0:
         return None
-    field = lambda key: (re.search(rf"^\s+{key}: (\S+)", out, re.M) or [None, ""])[1]
+    field = lambda key: (re.search(rf"^\s+{key}: \"?([^\s\"]+)", out, re.M) or [None, ""])[1]
+    gw = (re.search(r"^\s+gateway:\n\s+name: (\S+)", out, re.M) or [None, ""])[1]
     return {
+        "actor": field("actor") or name,
+        "gateway": gw,
+        "cpu": field("cpu"),
+        "memory": field("memory"),
         "actorUid": field("actorUid"),
         # status.id on servers before #587, metadata.uid after.
         "taskId": field("uid") or field("id"),
@@ -126,10 +132,11 @@ def poller():
         if states is not None:
             running = [n["name"] for n in NODES if states.get(n["name"]) in ("Running", "Working")]
             tasks = dict(zip(running, pool.map(poll_task, running)))
-            # Identity changes only when a task is (re)created or resumed.
+            # Identity and policy change only when a task is (re)created or
+            # changes state. Pending tasks have both too.
             with lock:
-                stale = [n for n in running
-                         if not state[n]["identity"] or state[n]["state"] != states.get(n)]
+                stale = [n["name"] for n in NODES if n["name"] in states and
+                         (not state[n["name"]]["identity"] or state[n["name"]]["state"] != states[n["name"]])]
             identities = dict(zip(stale, pool.map(poll_identity, stale)))
             with lock:
                 for n in NODES:
