@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AX task tree</title>
+<link rel="icon" href="/axel.svg">
+<style>
+  :root {
+    /* From the axel logo: pink #eea0bb, deep pink #e4769d, blush #f5dce2, on black. */
+    --bg: #0d0b0c; --panel: #151214; --card: #1c181a; --line: #322a2e;
+    --text: #f5eef0; --dim: #a69ba0; --faint: #6e6368; --accent: #eea0bb; --steer: #e4769d;
+    --ok: #5cc392; --warn: #e8b84a; --err: #f06a6a; --back: #f0975a; --pink: #eea0bb; --blush: #f5dce2;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+  header { display: flex; align-items: center; gap: 14px; padding: 10px 20px;
+           border-bottom: 1px solid var(--line); }
+  header img { height: 44px; }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .01em; white-space: nowrap; }
+  header h1 span { color: var(--pink); }
+  header .sub { color: var(--dim); flex: 1; font-size: 13px; }
+  header .sub code { font-family: var(--mono); color: var(--text); }
+  button { background: var(--card); color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600; }
+  .busy { color: var(--warn); font-family: var(--mono); font-size: 12px; }
+
+  main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+  #canvas { position: relative; overflow: auto; }
+  #stage { position: relative; margin: 28px auto; }
+  #edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+  #edges path { fill: none; stroke: var(--line); stroke-width: 2; }
+  #edges path.live { stroke: #5a3f4b; }
+  #edges path.target { stroke: var(--steer); }
+  #edges path.flow { stroke: var(--steer); stroke-dasharray: 6 6; animation: flow .6s linear infinite; }
+  @keyframes flow { to { stroke-dashoffset: -12; } }
+
+  .node { position: absolute; width: 210px; background: var(--card); border: 1px solid var(--line);
+          border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: border-color .2s, box-shadow .2s, opacity .3s; }
+  .node:hover { border-color: #54474d; }
+  .node.selected { border-color: #fff; }
+  .node.target { box-shadow: 0 0 0 2px #ffffffb3 inset; }
+  .node.pending { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 2px #fff inset, 0 0 22px #ffffff59; } }
+  .node.idle { opacity: .5; }
+  .node.idle:hover { opacity: .8; }
+  .node.failed { border-color: var(--err); }
+  .node.compact { width: 170px; }
+  .node .top .pill { margin-left: auto; }
+  .node .top { display: flex; align-items: center; gap: 6px; }
+  .node .top { flex-wrap: wrap; }
+  .node .name { font-weight: 600; font-family: var(--mono); flex: 1 0 100%; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; margin-bottom: 4px; }
+  .pill { font-size: 10.5px; padding: 2px 8px; border-radius: 99px; background: #2a2427; color: var(--dim);
+          text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+  .pill.work { background: #3b2530; color: var(--accent); }
+  .pill.ok { background: #173a2b; color: var(--ok); }
+  .pill.wait { background: #3a3117; color: var(--warn); }
+  .pill.bad { background: #3d1c1c; color: var(--err); }
+  .pill.back { background: #3d2717; color: var(--back); }
+  .act { font-size: 11px; padding: 1px 7px; white-space: nowrap; border-radius: 5px; line-height: 18px; color: var(--dim); }
+  .act:hover:not(:disabled) { color: var(--text); }
+  .goal { color: var(--dim); margin: 4px 0 6px; font-size: 13px; }
+  .bar { height: 4px; background: #2a2427; border-radius: 2px; overflow: hidden; margin: 6px 0 4px; }
+  .bar div { height: 100%; background: var(--accent); transition: width .6s ease; }
+  .bar.ok div { background: var(--ok); } .bar.bad div { background: var(--err); }
+  .bar.back div { background: var(--back); } .bar.wait div { background: var(--warn); }
+  .detail { font-size: 12.5px; margin-bottom: 6px; }
+  .detail.bad { color: var(--err); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  .chips:empty { display: none; }
+  .chip { font-size: 11px; padding: 1px 7px; border-radius: 4px; background: #3d1f2c; color: var(--blush); }
+  .chip.new { animation: pop .5s ease-out; }
+  @keyframes pop { from { transform: scale(.6); background: var(--steer); color: #000; } }
+  .ident { font-family: var(--mono); font-size: 10.5px; color: var(--faint); border-top: 1px dashed var(--line);
+           padding-top: 6px; margin-top: 2px; line-height: 1.5; }
+  .ident b { color: var(--dim); font-weight: 500; }
+  .log { font-family: var(--mono); font-size: 11px; color: var(--dim); background: #141113;
+         border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; }
+  .log div + div { margin-top: 3px; }
+  .log div:not(:last-child) { opacity: .6; }
+  .log .steered { color: var(--steer); }
+
+  aside { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+             margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  #activity { overflow: auto; padding: 8px 16px; font-family: var(--mono); font-size: 11.5px; flex: 1; }
+  #activity div { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+  #activity .t { color: var(--faint); margin-right: 8px; }
+  #activity .cmd { color: var(--accent); }
+  #activity .out { color: var(--dim); }
+  #activity .ok { color: var(--ok); }
+  #activity .err { color: var(--err); }
+
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 20px;
+           display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  footer .label { color: var(--dim); }
+  footer .label b { color: var(--steer); font-family: var(--mono); }
+  footer input { flex: 1; min-width: 220px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 8px 12px; font: inherit; }
+  footer input:focus { outline: none; border-color: #fff; }
+  .preset { font-size: 12px; padding: 5px 10px; color: var(--steer); }
+</style>
+</head>
+<body>
+<header>
+  <img src="/axel.svg" alt="axel, the AX axolotl">
+  <h1><span>AX</span> task tree</h1>
+  <span class="sub" id="sub"></span>
+  <span class="busy" id="busy"></span>
+  <button id="up" class="primary">Start</button>
+  <button id="down">Tear down</button>
+</header>
+<main>
+  <div id="canvas"><div id="stage"><svg id="edges"></svg></div></div>
+  <aside><h2>Activity</h2><div id="activity"></div></aside>
+</main>
+<footer>
+  <span class="label">Steer <b id="target">–</b> + subtree (<span id="count">0</span> tasks)</span>
+  <input id="msg" placeholder="message" autocomplete="off">
+  <span id="presets"></span>
+  <button id="send" class="primary">Steer</button>
+</footer>
+
+<script>
+const HGAP = 30, VGAP = 22;
+// Gates get narrower boxes than deploys, so the long chain fits.
+const width = n => n.kind === "gate" ? 170 : 210;
+const $ = id => document.getElementById(id);
+let nodes = [], selected = null, busy = null, presets = null;
+// pending[name] = {msg, seen}: a steering message on its way to that task,
+// and how many times the task had already received it when it was sent.
+const pending = {};
+// transit[name] = the AX state a suspend or resume was asked from; the button
+// stays disabled until the task leaves it.
+const transit = {};
+// Chips already on screen, so only newly received steering animates.
+const shown = new Set();
+
+const byName = name => nodes.find(n => n.name === name);
+const children = name => nodes.filter(n => n.parents.includes(name)).map(n => n.name);
+const subtree = name => [...new Set([name, ...children(name).flatMap(subtree)])];
+const isRunning = s => s === "Running" || s === "Working";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const count = (arr, x) => arr.filter(y => y === x).length;
+
+// phase is what a box reports: the agent's own phase when it has one, else
+// the AX task state. A task that has never run is PENDING, or SKIPPED once its
+// parent can no longer finish; one that ran and stopped is SUSPENDED.
+function phase(n) {
+  if (n.state === "Absent") return "ABSENT";
+  if (!isRunning(n.state)) {
+    if (n.started) return "SUSPENDED";
+    const stuck = n.parents.some(p => ["FAILED", "ROLLING_BACK", "ROLLED_BACK", "SKIPPED"].includes(phase(byName(p))));
+    return stuck ? "SKIPPED" : "PENDING";
+  }
+  return n.status?.phase || (n.log.length ? "RUNNING" : "STARTING");
+}
+const TONE = {DEPLOYING: "work", BAKING: "work", VERIFYING: "work", GATING: "work", VALIDATING: "work", STARTING: "work", RUNNING: "ok", DONE: "ok",
+              PAUSED: "wait", SUSPENDED: "wait", FAILED: "bad", ROLLING_BACK: "back", ROLLED_BACK: "back"};
+
+// layout is left to right: a stage sits one column right of its deepest
+// parent. Leaves are stacked top to bottom and every parent is centered on its
+// children; a stage that joins several parents is centered on them instead.
+// Heights come from the rendered boxes.
+function layout(root, heights) {
+  const depth = {};
+  for (const n of nodes) depth[n.name] = Math.max(-1, ...n.parents.map(p => depth[p])) + 1;
+  const colW = [], colX = [0];
+  for (const n of nodes) colW[depth[n.name]] = Math.max(colW[depth[n.name]] || 0, width(n));
+  colW.forEach((w, i) => colX[i + 1] = colX[i] + w + HGAP);
+
+  const pos = {}, joins = nodes.filter(n => n.parents.length > 1);
+  const mid = p => p.y + p.h / 2;
+  let y = 0;
+  (function place(name) {
+    const kids = children(name).filter(k => byName(k).parents.length === 1);
+    kids.forEach(place);
+    const h = heights[name];
+    let top;
+    if (kids.length) top = (mid(pos[kids[0]]) + mid(pos[kids.at(-1)])) / 2 - h / 2;
+    else { top = y; y += h + VGAP; }
+    pos[name] = {x: colX[depth[name]], y: top, h};
+  })(root);
+  for (const n of joins) {
+    const h = heights[n.name], ys = n.parents.map(p => mid(pos[p]));
+    pos[n.name] = {x: colX[depth[n.name]], y: ys.reduce((a, b) => a + b) / ys.length - h / 2, h};
+  }
+  const minY = Math.min(...Object.values(pos).map(p => p.y));
+  Object.values(pos).forEach(p => p.y -= minY);
+  return pos;
+}
+
+// action is the suspend/resume button for a box.
+function action(n) {
+  if (n.state === "Absent") return "";
+  if (transit[n.name]) return `<button class="act" disabled>${isRunning(transit[n.name]) ? "suspending" : "resuming"}…</button>`;
+  return isRunning(n.state)
+    ? `<button class="act" data-op="suspend" title="ax suspend task ${esc(n.name)}">⏸ suspend</button>`
+    : `<button class="act" data-op="resume" title="ax resume task ${esc(n.name)}">▶ resume</button>`;
+}
+
+function card(n, targets) {
+  const ph = phase(n), tone = TONE[ph] || "", st = n.status, id = n.identity;
+  const el = document.createElement("div");
+  el.className = ["node", width(n) < 210 && "compact", n.name === selected && "selected", targets.has(n.name) && "target",
+                  pending[n.name] && "pending", ["ABSENT", "PENDING", "SKIPPED", "SUSPENDED"].includes(ph) && "idle",
+                  ph === "FAILED" && "failed"].filter(Boolean).join(" ");
+  const chips = n.steer.map((s, i) => {
+    const key = `${n.name}#${i}#${s}`, fresh = !shown.has(key);
+    shown.add(key);
+    return `<span class="chip${fresh ? " new" : ""}">${esc(s)}</span>`;
+  }).join("");
+  const log = st ? "" : n.log.slice(-2).map(l =>
+    `<div class="${l.text.startsWith("STEERED") ? "steered" : ""}">${esc(l.time)} ${esc(l.text)}</div>`).join("");
+  el.innerHTML = `
+    <div class="top"><span class="name">${esc(n.name)}</span>${action(n)}<span class="pill ${tone}">${esc(ph.replace("_", " "))}</span></div>
+    <div class="goal">${esc(n.goal)}</div>
+    ${st && st.pct != null ? `<div class="bar ${tone}"><div style="width:${st.pct}%"></div></div>` : ""}
+    ${st ? `<div class="detail ${tone === "bad" ? "bad" : ""}">${esc(st.detail)}</div>` : ""}
+    ${log ? `<div class="log">${log}</div>` : ""}
+    <div class="chips">${chips}</div>
+    <div class="ident">${id ? `
+      <div><b>actor uid</b> ${esc(id.actorUid.slice(0, 8) || "–")}${id.worker && isRunning(n.state) ? ` · <b>worker</b> ${esc(id.worker)}` : ""}</div>`
+      : `<div>no actor yet · ${esc(n.state === "Absent" ? "task not created" : "task " + n.state.toLowerCase())}</div>`}
+    </div>`;
+  el.onclick = () => { selected = n.name; render(); };
+  const btn = el.querySelector("button[data-op]");
+  if (btn) btn.onclick = e => { e.stopPropagation(); suspendResume(n, btn.dataset.op); };
+  return el;
+}
+
+function render() {
+  if (!nodes.length) return;
+  const root = nodes.find(n => !n.parents.length).name;
+  selected ??= root;
+  const targets = new Set(subtree(selected));
+  const stage = $("stage"), svg = $("edges");
+  stage.querySelectorAll(".node").forEach(e => e.remove());
+
+  const els = {}, heights = {};
+  for (const n of nodes) {
+    els[n.name] = card(n, targets);
+    stage.appendChild(els[n.name]);
+    heights[n.name] = els[n.name].offsetHeight;
+  }
+  const pos = layout(root, heights);
+  for (const n of nodes) {
+    els[n.name].style.left = pos[n.name].x + "px";
+    els[n.name].style.top = pos[n.name].y + "px";
+  }
+
+  const w = Math.max(...nodes.map(n => pos[n.name].x + width(n)));
+  const h = Math.max(...Object.values(pos).map(p => p.y + p.h));
+  stage.style.width = w + "px"; stage.style.height = h + "px";
+  svg.setAttribute("width", w); svg.setAttribute("height", h);
+  svg.innerHTML = nodes.flatMap(n => n.parents.map(p => {
+    const a = pos[p], b = pos[n.name];
+    const x1 = a.x + width(byName(p)), y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2, mx = (x1 + x2) / 2;
+    const cls = pending[n.name] ? "flow" : targets.has(n.name) && targets.has(p) ? "target"
+              : isRunning(n.state) ? "live" : "";
+    return `<path class="${cls}" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`;
+  })).join("");
+
+  $("target").textContent = selected;
+  $("count").textContent = targets.size;
+  $("busy").textContent = busy ? `⏳ ${busy}…` : "";
+  $("up").disabled = !!busy || nodes.every(n => n.state !== "Absent");
+  $("down").disabled = !!busy || nodes.every(n => n.state === "Absent");
+  $("send").disabled = !nodes.some(n => isRunning(n.state));
+}
+
+function renderActivity(items) {
+  const box = $("activity"), atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 10;
+  box.innerHTML = items.map(a => `<div class="${a.kind}"><span class="t">${a.time}</span>${esc(a.text)}</div>`).join("");
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function renderPresets(list) {
+  presets = list;
+  $("presets").innerHTML = list.map(p => `<button class="preset">${esc(p)}</button>`).join(" ");
+  $("presets").querySelectorAll("button").forEach(b => b.onclick = () => steer(b.textContent));
+  $("msg").placeholder = list.length ? `e.g. ${list[0]}` : "message";
+}
+
+async function refresh() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    nodes = s.nodes; busy = s.busy;
+    if (!presets) {
+      renderPresets(s.presets);
+      $("sub").innerHTML = `<code>${esc(s.script)}</code> in atespace <code>${esc(s.atespace)}</code>. ` +
+        `Each box is a sandboxed AX Task. Pick one and steer it: the message reaches that task and every task below it.`;
+    }
+    for (const n of nodes) {
+      // A message has arrived once the task has received it one more time than before.
+      const p = pending[n.name];
+      if (p && (count(n.steer, p.msg) > p.seen || !isRunning(n.state))) delete pending[n.name];
+      if (transit[n.name] && isRunning(transit[n.name]) !== isRunning(n.state)) delete transit[n.name];
+    }
+    render(); renderActivity(s.activity);
+  } catch (e) { $("busy").textContent = "server unreachable"; }
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"},
+                               body: JSON.stringify(body || {})});
+  refresh();
+  return r.ok;
+}
+
+async function suspendResume(n, op) {
+  transit[n.name] = n.state;
+  setTimeout(() => { delete transit[n.name]; render(); }, 90000);  // give up if it never changes
+  render();
+  if (!await post("/api/task", {node: n.name, op})) delete transit[n.name];
+}
+
+async function steer(msg) {
+  msg = msg.trim();
+  if (!msg || !selected) return;
+  if (await post("/api/steer", {node: selected, msg})) {
+    for (const name of subtree(selected)) {
+      const n = byName(name);
+      if (isRunning(n.state)) pending[name] = {msg, seen: count(n.steer, msg)};
+    }
+    $("msg").value = "";
+    render();
+  }
+}
+
+$("up").onclick = () => post("/api/up");
+$("down").onclick = () => confirm("Delete every task in the tree?") && post("/api/down");
+$("send").onclick = () => steer($("msg").value);
+$("msg").onkeydown = e => e.key === "Enter" && steer($("msg").value);
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
