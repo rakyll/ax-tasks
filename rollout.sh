@@ -31,8 +31,8 @@
 #   rollforward [version]
 #             fix forward: deploy an earlier version (default: the one being
 #             replaced) as a new release, even after the stage has finished.
-#             Goes bottom-up: a deploy starts only once every deploy below it
-#             is ROLLED_FORWARD, so the regions go first and the canary last.
+#             Goes top-down: a deploy starts only once every deploy above it
+#             is ROLLED_FORWARD, so the canary goes first and the regions last.
 #
 # validate is set up to fail its p99 latency check, so there is something to
 # steer: roll forward from canary and every deploy moves to the earlier
@@ -442,20 +442,31 @@ steer() {
   rm -rf "$dir"
 }
 
-# rollforward steers $1 and its subtree onto an earlier version, bottom-up: a
-# deploy gets the message once every running deploy below it is
-# ROLLED_FORWARD. Checks get it right away, so one that is still running stops.
+# ancestors prints every stage above $1.
+ancestors() {
+  local p
+  for p in $(parent_of "$(row_of "$1")" | tr , ' '); do
+    [[ "$p" == - ]] && continue
+    echo "$p"; ancestors "$p"
+  done | awk '!seen[$0]++'
+}
+
+# rollforward steers $1 and its subtree onto an earlier version, top-down, the
+# same way the release went out: a deploy gets the message once every running
+# deploy above it (and in the subtree) is ROLLED_FORWARD. Checks get it right
+# away, so one that is still running stops.
 rollforward() {
-  local node="$1" msg="$2" dir t d left next ready
+  local node="$1" msg="$2" dir t d all left next ready
   dir=$(mktemp -d)
-  left=$(subtree "$node")
+  all=" $(subtree "$node" | tr '\n' ' ') " left=$all
   while [[ -n "$left" ]]; do
     snapshot "$dir"
     next=""
     for t in $left; do
       ready=1
       if [[ "$(kind_of "$(row_of "$t")")" == deploy ]]; then
-        for d in $(subtree "$t" | tail -n +2); do
+        for d in $(ancestors "$t"); do
+          [[ "$all" == *" $d "* ]] || continue
           [[ "$(kind_of "$(row_of "$d")")" == deploy ]] && is_running "$dir" "$d" || continue
           [[ "$(phase "$dir" "$d")" == ROLLED_FORWARD ]] || ready=0
         done
