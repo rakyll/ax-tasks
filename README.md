@@ -3,7 +3,7 @@
 Demos that compose several [AX](https://github.com/agent-substrate/ax) Tasks into an execution tree and steer them while they run.
 
 - `tree.sh`: a minimal tree (lead, backend, backend-tests, docs). Steering a node reaches it and every task below it.
-- `rollout.sh`: a staged production rollout. A canary, then gate-checks between stages, us-central, a fan-out to three regions, and a final validate that joins them. Rollbacks revert bottom-up. Every task has its own identity and policy: a Gateway installed as its actor's egress policy, plus sandbox CPU and memory limits.
+- `rollout.sh`: a staged production rollout. A canary, then gate-checks between stages, us-central, a fan-out to three regions, and a final validate that joins them. Fixing a bad release rolls forward to an earlier version, bottom-up. Every task has its own identity and policy: a Gateway installed as its actor's egress policy, plus sandbox CPU and memory limits.
 - `web/`: a web view of either tree, with steering, per-task suspend and resume, and a live activity feed.
 
 ```sh

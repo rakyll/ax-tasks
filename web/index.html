@@ -158,13 +158,13 @@ function phase(n) {
   if (n.state === "Absent") return "ABSENT";
   if (!isRunning(n.state)) {
     if (n.started) return "SUSPENDED";
-    const stuck = n.parents.some(p => ["FAILED", "ROLLING_BACK", "ROLLED_BACK", "SKIPPED"].includes(phase(byName(p))));
+    const stuck = n.parents.some(p => ["FAILED", "ROLLING_FORWARD", "ROLLED_FORWARD", "ABORTED", "SKIPPED"].includes(phase(byName(p))));
     return stuck ? "SKIPPED" : "PENDING";
   }
   return n.status?.phase || (n.log.length ? "RUNNING" : "STARTING");
 }
 const TONE = {DEPLOYING: "work", BAKING: "work", VERIFYING: "work", GATING: "work", VALIDATING: "work", STARTING: "work", RUNNING: "ok", DONE: "ok",
-              PAUSED: "wait", SUSPENDED: "wait", FAILED: "bad", ROLLING_BACK: "back", ROLLED_BACK: "back"};
+              PAUSED: "wait", SUSPENDED: "wait", FAILED: "bad", ROLLING_FORWARD: "back", ROLLED_FORWARD: "back", ABORTED: "wait"};
 
 // layout is left to right: a stage sits one column right of its deepest
 // parent. Leaves are stacked top to bottom and every parent is centered on its
@@ -232,7 +232,7 @@ function card(n, targets) {
   const log = st ? "" : n.log.slice(-2).map(l =>
     `<div class="${l.text.startsWith("STEERED") ? "steered" : ""}">${esc(l.time)} ${esc(l.text)}</div>`).join("");
   el.innerHTML = `
-    <div class="top"><span class="name">${esc(n.name)}</span>${action(n)}<span class="pill ${tone}">${esc(ph.replace("_", " "))}</span></div>
+    <div class="top"><span class="name">${esc(n.name)}</span>${action(n)}<span class="pill ${tone}">${esc(ph.replaceAll("_", " "))}</span></div>
     <div class="goal">${esc(n.goal)}</div>
     ${st && st.pct != null ? `<div class="bar ${tone}"><div style="width:${st.pct}%"></div></div>` : ""}
     ${st ? `<div class="detail ${tone === "bad" ? "bad" : ""}">${esc(st.detail)}</div>` : ""}

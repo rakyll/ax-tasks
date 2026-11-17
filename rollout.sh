@@ -28,18 +28,20 @@
 # /workspace/inbox between steps. Steering reaches a stage and every stage
 # below it:
 #   pause     hold at the current step     resume  carry on
-#   rollback  revert to the old version, even after the stage has finished.
-#             Reverts bottom-up: a deploy starts only once every deploy below
-#             it is ROLLED_BACK, so the regions go first and the canary last.
+#   rollforward [version]
+#             fix forward: deploy an earlier version (default: the one being
+#             replaced) as a new release, even after the stage has finished.
+#             Goes bottom-up: a deploy starts only once every deploy below it
+#             is ROLLED_FORWARD, so the regions go first and the canary last.
 #
 # validate is set up to fail its p99 latency check, so there is something to
-# steer: roll back from canary and every deploy reverts. Set ROLLOUT_FAIL= for
-# an all-green rollout.
+# steer: roll forward from canary and every deploy moves to the earlier
+# version. Set ROLLOUT_FAIL= for an all-green rollout.
 #
 # Usage:
 #   ./rollout.sh up                     create every stage, then run
 #   ./rollout.sh run                    start stages as their parents finish
-#   ./rollout.sh steer <stage> <msg>    e.g. steer canary rollback
+#   ./rollout.sh steer <stage> <msg>    e.g. steer canary 'rollforward v1.41'
 #   ./rollout.sh status                 show every stage
 #   ./rollout.sh down                   delete every stage and its gateway
 #
@@ -152,10 +154,10 @@ subtree() {
 # new version step by step and bakes; a gate stage checks whether the release
 # may go further, and validate checks the whole release.
 # Between steps it drains /workspace/inbox for operator steering, and it stays
-# up after finishing so a completed stage can still be rolled back.
+# up after finishing so a completed stage can still be rolled forward.
 read -r -d '' AGENT <<'SH' || true
 cd /workspace
-pct=0 paused="" rollback="" detail=""
+pct=0 paused="" target="" detail=""
 log() { echo "$(date +%T) [$NAME] $*" >> agent.log; }
 report() { echo "$1 $2 $3" > status.new && mv status.new status; }
 
@@ -167,24 +169,26 @@ inbox() {
     case "$msg" in
       pause*) paused=1 ;;
       resume*) paused="" ;;
-      rollback*) rollback=1 ;;
+      rollforward*)
+        target=$(echo ${msg#rollforward})
+        target=${target:-$FROM} ;;
     esac
   done < inbox.reading
   rm -f inbox.reading
 }
 
 # step reports progress, then waits one tick. It holds while paused and fails
-# once a rollback has been asked for.
+# once a roll-forward has been asked for.
 step() {
   phase=$1 pct=$2 detail=$3
   report "$phase" "$pct" "$detail"
   log "$phase $pct% $detail"
   sleep "$TICK"; inbox
-  while [ -n "$paused" ] && [ -z "$rollback" ]; do
+  while [ -n "$paused" ] && [ -z "$target" ]; do
     report PAUSED "$pct" "paused by operator at: $detail"
     sleep 1; inbox
   done
-  [ -z "$rollback" ]
+  [ -z "$target" ]
 }
 
 deploy() {
@@ -198,15 +202,18 @@ deploy() {
   log "DONE: $SCOPE serving $TO"
 }
 
-revert() {
-  log "rolling back $SCOPE to $FROM"
-  while [ "$pct" -gt 0 ]; do
-    pct=$((pct > 25 ? pct - 25 : 0))
-    report ROLLING_BACK "$pct" "$TO on $pct% of $SCOPE, rest back on $FROM"
-    sleep "$TICK"
+# forward deploys $target as a new release: traffic moves onto it step by
+# step, the same way it moved onto the bad version.
+forward() {
+  to=$target target=""
+  log "rolling forward $SCOPE to $to"
+  for p in 10 25 50 100; do
+    report ROLLING_FORWARD "$p" "$to on $p% of $SCOPE"
+    log "ROLLING_FORWARD $p% $to on $p% of $SCOPE"
+    sleep "$TICK"; inbox
   done
-  report ROLLED_BACK 0 "$SCOPE serving $FROM"
-  log "ROLLED_BACK: $SCOPE serving $FROM"
+  report ROLLED_FORWARD 100 "$SCOPE serving $to"
+  log "ROLLED_FORWARD: $SCOPE serving $to"
 }
 
 check() {
@@ -252,12 +259,13 @@ printf 'allow %s %s\ndeny %s %s\n' "$ALLOW" "$a" "$DENY" "$d" > policy
 log "POLICY: $ALLOW $a; $DENY $d"
 log "started: $KIND $SCOPE (parent: ${PARENT:-none})"
 if [ "$KIND" = deploy ]; then
-  if deploy; then
-    while [ -z "$rollback" ]; do sleep 1; inbox; done
-  fi
-  revert
+  deploy || true
+  while true; do
+    while [ -z "$target" ]; do sleep 1; inbox; done
+    forward
+  done
 else
-  check || report ROLLED_BACK 0 "checks aborted"
+  check || report ABORTED 0 "stopped: rolling forward to $target"
 fi
 while true; do sleep 3600; done
 SH
@@ -363,7 +371,7 @@ run() {
           [[ "$q" == "-" ]] && continue
           case "$(phase "$dir" "$q")" in
             DONE) ;;
-            FAILED | ROLLING_BACK | ROLLED_BACK | SKIPPED) pp=FAILED; break ;;
+            FAILED | ROLLING_FORWARD | ROLLED_FORWARD | ABORTED | SKIPPED) pp=FAILED; break ;;
             *) pp=WAITING ;;
           esac
         done
@@ -383,7 +391,7 @@ run() {
         echo "$p" > "$dir/$name.prev"
       fi
       case "$p" in
-        DONE | FAILED | ROLLED_BACK | SKIPPED) ;;
+        DONE | FAILED | ROLLED_FORWARD | ABORTED | SKIPPED) ;;
         *) active=1 ;;
       esac
     done
@@ -394,7 +402,7 @@ run() {
   echo "rollout finished:"
   for name in $(names); do printf '  %-20s %s\n' "$name" "$(cat "$dir/$name.prev")"; done
   if grep -qx FAILED "$dir"/*.prev; then
-    echo "a check failed. Roll back every deploy with: $0 steer canary rollback"
+    echo "a check failed. Roll every deploy forward to ${FROM} with: $0 steer canary 'rollforward ${FROM}'"
   fi
   rm -rf "$dir"
 }
@@ -427,17 +435,17 @@ send() {
 
 steer() {
   local node="$1" msg="$2" dir t
-  [[ "$msg" == rollback* ]] && { rollback "$@"; return; }
+  [[ "$msg" == rollforward* ]] && { rollforward "$@"; return; }
   dir=$(mktemp -d)
   ax get tasks > "$dir/tasks"
   for t in $(subtree "$node"); do send "$dir" "$t" "$msg"; done
   rm -rf "$dir"
 }
 
-# rollback steers $1 and its subtree back to the old version, bottom-up: a
-# deploy gets the message once every running deploy below it is ROLLED_BACK.
-# Checks get it right away, so one that is still running stops.
-rollback() {
+# rollforward steers $1 and its subtree onto an earlier version, bottom-up: a
+# deploy gets the message once every running deploy below it is
+# ROLLED_FORWARD. Checks get it right away, so one that is still running stops.
+rollforward() {
   local node="$1" msg="$2" dir t d left next ready
   dir=$(mktemp -d)
   left=$(subtree "$node")
@@ -449,7 +457,7 @@ rollback() {
       if [[ "$(kind_of "$(row_of "$t")")" == deploy ]]; then
         for d in $(subtree "$t" | tail -n +2); do
           [[ "$(kind_of "$(row_of "$d")")" == deploy ]] && is_running "$dir" "$d" || continue
-          [[ "$(phase "$dir" "$d")" == ROLLED_BACK ]] || ready=0
+          [[ "$(phase "$dir" "$d")" == ROLLED_FORWARD ]] || ready=0
         done
       fi
       if ((ready)); then send "$dir" "$t" "$msg"; else next="$next $t"; fi
@@ -488,6 +496,6 @@ case "${1:-}" in
   nodes)    for row in "${TREE[@]}"; do
               printf '%s\t%s\t%s\t%s\n' "$(name_of "$row")" "$(parent_of "$row")" "$(goal_of "$row")" "$(kind_of "$row")"
             done ;;
-  presets)  printf '%s\n' pause resume rollback ;;
+  presets)  printf '%s\n' pause resume "rollforward ${FROM}" ;;
   *)        sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 2 ;;
 esac
