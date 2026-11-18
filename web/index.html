@@ -22,6 +22,9 @@
   header h1 { font-size: 18px; margin: 0; letter-spacing: .01em; white-space: nowrap; }
   header h1 span { color: var(--pink); }
   header .sub { color: var(--dim); flex: 1; font-size: 13px; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border-color: transparent; color: var(--dim); padding: 6px 12px; white-space: nowrap; }
+  nav button.on { color: var(--text); border-color: var(--line); background: var(--card); }
   header .sub code { font-family: var(--mono); color: var(--text); }
   button { background: var(--card); color: var(--text); border: 1px solid var(--line);
            border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; }
@@ -50,7 +53,6 @@
   .node.idle { opacity: .5; }
   .node.idle:hover { opacity: .8; }
   .node.failed { border-color: var(--err); }
-  .node.compact { width: 180px; }
   .node .top .pill { margin-left: auto; }
   .node .top { display: flex; align-items: center; gap: 6px; }
   .node .top { flex-wrap: wrap; }
@@ -82,6 +84,27 @@
   .ident b { color: var(--dim); font-weight: 500; }
   .ident.grid { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; }
   .ident span { overflow-wrap: anywhere; }
+  .commits { font-family: var(--mono); font-size: 11px; background: #141113; border-radius: 6px;
+             padding: 6px 8px; margin-bottom: 6px; }
+  .commits div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .commits div + div { margin-top: 2px; }
+  .commits code { color: var(--faint); margin-right: 4px; }
+  .who { font-weight: 600; }
+  .who.antigravity, .lane .antigravity { color: #8ab4f8; }
+  .who.claude-code, .lane .claude-code { color: #d97757; }
+  .who.workspace { color: var(--blush); }
+  .lane { position: absolute; font-size: 12px; }
+  .lane .ws { text-align: center; color: var(--dim); font-size: 11.5px; padding: 6px 0 10px;
+              border-bottom: 1px dashed var(--line); margin-bottom: 8px; }
+  .lane .ws b { font-family: var(--mono); color: var(--blush); font-weight: 500; }
+  .lane .empty { color: var(--faint); text-align: center; padding-top: 6px; }
+  .hand { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px;
+          margin-bottom: 8px; width: 88%; }
+  .hand.r2l { margin-left: auto; }
+  .hand.new { animation: pop .5s ease-out; }
+  .hand .meta { font-family: var(--mono); font-size: 10.5px; color: var(--faint); display: flex; gap: 6px; white-space: nowrap; }
+  .hand .meta .file { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .hand .text { margin-top: 2px; }
   .log { font-family: var(--mono); font-size: 11px; color: var(--dim); background: #141113;
          border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; }
   .log div + div { margin-top: 3px; }
@@ -113,6 +136,7 @@
 <header>
   <img src="/axel.svg" alt="axel, the AX axolotl">
   <h1><span>AX</span> tasks</h1>
+  <nav id="tabs"></nav>
   <span class="sub" id="sub"></span>
   <span class="busy" id="busy"></span>
   <button id="up" class="primary">Start</button>
@@ -123,18 +147,20 @@
   <aside><h2>Activity</h2><div id="activity"></div></aside>
 </main>
 <footer>
-  <span class="label">Steer <b id="target">–</b> + subtree (<span id="count">0</span> tasks)</span>
+  <span class="label">Steer <b id="target">–</b><span id="count"></span></span>
   <input id="msg" placeholder="message" autocomplete="off">
   <span id="presets"></span>
   <button id="send" class="primary">Steer</button>
 </footer>
 
 <script>
-const HGAP = 30, VGAP = 22;
-// Gates get narrower boxes than deploys, so the long chain fits.
-const width = n => n.kind === "gate" ? 180 : 230;
+const HGAP = 30, VGAP = 22, LANE = 380;
+// Gates get narrower boxes than deploys, so the long chain fits; collaborating
+// agents get wider ones, for their git history.
+const width = n => n.kind === "gate" ? 180 : ["fixer", "tester"].includes(n.kind) ? 300 : 230;
 const $ = id => document.getElementById(id);
-let nodes = [], selected = null, busy = null, presets = null;
+// demo is the tab on screen: a script on the server, named in the URL hash.
+let demo = location.hash.slice(1), nodes = [], selected = null, busy = null, presets = null;
 // pending[name] = {msg, seen}: a steering message on its way to that task,
 // and how many times the task had already received it when it was sent.
 const pending = {};
@@ -164,13 +190,26 @@ function phase(n) {
   return n.status?.phase || (n.log.length ? "RUNNING" : "STARTING");
 }
 const TONE = {DEPLOYING: "work", BAKING: "work", VERIFYING: "work", GATING: "work", VALIDATING: "work", STARTING: "work", RUNNING: "ok", DONE: "ok",
-              PAUSED: "wait", SUSPENDED: "wait", FAILED: "bad", ROLLING_FORWARD: "back", ROLLED_FORWARD: "back", ABORTED: "wait"};
+              PAUSED: "wait", SUSPENDED: "wait", FAILED: "bad", ROLLING_FORWARD: "back", ROLLED_FORWARD: "back", ABORTED: "wait",
+              READING: "work", REPRODUCING: "work", FIXING: "work", WRITING_TESTS: "work", TESTING: "work", REVIEWING: "work",
+              WAITING: "wait"};
+// peers: tasks that work side by side rather than in a tree.
+const peers = () => nodes.length > 1 && nodes.every(n => !n.parents.length);
 
 // layout is left to right: a stage sits one column right of its deepest
 // parent. Leaves are stacked top to bottom and every parent is centered on its
 // children; a stage that joins several parents is centered on them instead.
 // Heights come from the rendered boxes.
 function layout(root, heights) {
+  if (peers()) {
+    // Two agents, with the lane of handoffs between them.
+    let x = 0;
+    return Object.fromEntries(nodes.map((n, i) => {
+      const p = [n.name, {x, y: 0, h: heights[n.name]}];
+      x += width(n) + (i === 0 ? LANE : HGAP);
+      return p;
+    }));
+  }
   const depth = {};
   for (const n of nodes) depth[n.name] = Math.max(-1, ...n.parents.map(p => depth[p])) + 1;
   const colW = [], colX = [0];
@@ -214,6 +253,7 @@ function identity(n, id) {
   return `
       <b>actor</b><span title="${esc(where)}">${esc(id.actor)}</span>
       <b>uid</b><span>${esc(id.actorUid.slice(0, 8) || "–")}</span>
+      ${id.workspace ? `<b>workspace</b><span>${esc(id.workspace)}</span>` : ""}
       <b>egress</b><span>${esc(id.gateway || "none")}</span>
       <b>limits</b><span>${id.cpu ? `${esc(id.cpu)} cpu · ${esc(id.memory)}` : "default"}</span>`;
 }
@@ -221,7 +261,7 @@ function identity(n, id) {
 function card(n, targets) {
   const ph = phase(n), tone = TONE[ph] || "", st = n.status, id = n.identity;
   const el = document.createElement("div");
-  el.className = ["node", width(n) < 230 && "compact", n.name === selected && "selected", targets.has(n.name) && "target",
+  el.className = ["node", n.name === selected && "selected", targets.has(n.name) && "target",
                   pending[n.name] && "pending", ["ABSENT", "PENDING", "SKIPPED", "SUSPENDED"].includes(ph) && "idle",
                   ph === "FAILED" && "failed"].filter(Boolean).join(" ");
   const chips = n.steer.map((s, i) => {
@@ -229,6 +269,8 @@ function card(n, targets) {
     shown.add(key);
     return `<span class="chip${fresh ? " new" : ""}">${esc(s)}</span>`;
   }).join("");
+  const commits = n.commits.slice(0, 4).map(c =>
+    `<div title="${esc(c.subject)}"><code>${esc(c.hash)}</code><span class="who ${c.author === "Antigravity" ? "antigravity" : c.author === "Claude Code" ? "claude-code" : "workspace"}">${esc(c.author)}</span> ${esc(c.subject)}</div>`).join("");
   const log = st ? "" : n.log.slice(-2).map(l =>
     `<div class="${l.text.startsWith("STEERED") ? "steered" : ""}">${esc(l.time)} ${esc(l.text)}</div>`).join("");
   el.innerHTML = `
@@ -237,8 +279,10 @@ function card(n, targets) {
     ${st && st.pct != null ? `<div class="bar ${tone}"><div style="width:${st.pct}%"></div></div>` : ""}
     ${st ? `<div class="detail ${tone === "bad" ? "bad" : ""}">${esc(st.detail)}</div>` : ""}
     ${log ? `<div class="log">${log}</div>` : ""}
+    ${commits ? `<div class="commits">${commits}</div>` : ""}
     <div class="chips">${chips}</div>
     <div class="ident${id ? " grid" : ""}">${id ? identity(n, id) : `<div>${n.state === "Absent" ? "task not created" : "reading identity…"}</div>`}</div>`;
+  el.style.width = width(n) + "px";
   el.onclick = () => { selected = n.name; render(); };
   const btn = el.querySelector("button[data-op]");
   if (btn) btn.onclick = e => { e.stopPropagation(); suspendResume(n, btn.dataset.op); };
@@ -251,7 +295,7 @@ function render() {
   selected ??= root;
   const targets = new Set(subtree(selected));
   const stage = $("stage"), svg = $("edges");
-  stage.querySelectorAll(".node").forEach(e => e.remove());
+  stage.querySelectorAll(".node, .lane").forEach(e => e.remove());
 
   const els = {}, heights = {};
   for (const n of nodes) {
@@ -265,8 +309,9 @@ function render() {
     els[n.name].style.top = pos[n.name].y + "px";
   }
 
+  let h = Math.max(...Object.values(pos).map(p => p.y + p.h));
+  if (peers()) h = Math.max(h, lane(stage, pos));
   const w = Math.max(...nodes.map(n => pos[n.name].x + width(n)));
-  const h = Math.max(...Object.values(pos).map(p => p.y + p.h));
   stage.style.width = w + "px"; stage.style.height = h + "px";
   svg.setAttribute("width", w); svg.setAttribute("height", h);
   svg.innerHTML = nodes.flatMap(n => n.parents.map(p => {
@@ -278,11 +323,36 @@ function render() {
   })).join("");
 
   $("target").textContent = selected;
-  $("count").textContent = targets.size;
+  $("count").textContent = targets.size > 1 ? ` + subtree (${targets.size} tasks)` : "";
   $("busy").textContent = busy ? `⏳ ${busy}…` : "";
   $("up").disabled = !!busy || nodes.every(n => n.state !== "Absent");
   $("down").disabled = !!busy || nodes.every(n => n.state === "Absent");
   $("send").disabled = !nodes.some(n => isRunning(n.state));
+}
+
+// lane draws the handoffs between two peer agents, oldest first, in the gap
+// between their boxes, under the workspace they share. It returns its height.
+function lane(stage, pos) {
+  const [a, b] = nodes, el = document.createElement("div");
+  const hands = nodes.flatMap(n => n.handoffs.map(h => ({...h, from: n.name})))
+    .sort((x, y) => x.time.localeCompare(y.time));
+  const ws = nodes.map(n => n.identity?.workspace).find(Boolean);
+  el.className = "lane";
+  el.style.left = pos[a.name].x + width(a) + HGAP + "px";
+  el.style.width = LANE - 2 * HGAP + "px";
+  el.innerHTML = `
+    <div class="ws">${ws ? `both start from workspace <b>${esc(ws)}</b>` : "workspace not created"}</div>
+    ${hands.map(h => {
+      const key = `hand#${h.from}#${h.time}#${h.text}`, fresh = !shown.has(key);
+      shown.add(key);
+      const m = h.text.match(/^(.*) \((\S+\.patch)\)$/), text = m ? m[1] : h.text;
+      return `<div class="hand ${h.from === a.name ? "l2r" : "r2l"}${fresh ? " new" : ""}">
+        <div class="meta"><span class="${esc(h.from)}">${esc(h.from)} → ${esc(h.to)}</span>
+          <span class="file">${m ? esc(m[2]) : "note"}</span></div>
+        <div class="text">${esc(text)}</div></div>`;
+    }).join("") || `<div class="empty">handoffs between the agents show up here</div>`}`;
+  stage.appendChild(el);
+  return el.offsetHeight;
 }
 
 function renderActivity(items) {
@@ -300,13 +370,14 @@ function renderPresets(list) {
 
 async function refresh() {
   try {
-    const s = await (await fetch("/api/state")).json();
-    nodes = s.nodes; busy = s.busy;
+    const want = demo, s = await (await fetch(`/api/state?demo=${encodeURIComponent(demo)}`)).json();
+    if (want !== demo) return;  // the tab changed while this was in flight
+    demo = s.key; nodes = s.nodes; busy = s.busy;
     if (!presets) {
       renderPresets(s.presets);
-      $("sub").innerHTML = `<code>${esc(s.script)}</code> in atespace <code>${esc(s.atespace)}</code>. ` +
-        `Each box is a sandboxed AX Task. Pick one and steer it: the message reaches that task and every task below it.`;
+      $("sub").innerHTML = `<code>${esc(s.script)}</code> in atespace <code>${esc(s.atespace)}</code>. ${esc(s.about)}`;
     }
+    document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.key === demo));
     for (const n of nodes) {
       // A message has arrived once the task has received it one more time than before.
       const p = pending[n.name];
@@ -319,7 +390,7 @@ async function refresh() {
 
 async function post(path, body) {
   const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"},
-                               body: JSON.stringify(body || {})});
+                               body: JSON.stringify({demo, ...body})});
   refresh();
   return r.ok;
 }
@@ -345,12 +416,29 @@ async function steer(msg) {
 }
 
 $("up").onclick = () => post("/api/up");
-$("down").onclick = () => confirm("Delete every task in the tree?") && post("/api/down");
+$("down").onclick = () => confirm("Delete every task in this demo?") && post("/api/down");
 $("send").onclick = () => steer($("msg").value);
 $("msg").onkeydown = e => e.key === "Enter" && steer($("msg").value);
 
-refresh();
-setInterval(refresh, 1500);
+// show switches to another demo's tab and starts it from a clean slate.
+function show(key) {
+  demo = key; history.replaceState(null, "", "#" + key);
+  nodes = []; selected = null; presets = null;
+  for (const o of [pending, transit]) for (const k in o) delete o[k];
+  $("stage").querySelectorAll(".node, .lane").forEach(e => e.remove());
+  $("edges").innerHTML = ""; $("activity").innerHTML = "";
+  refresh();
+}
+
+(async () => {
+  const demos = await (await fetch("/api/demos")).json();
+  $("tabs").innerHTML = demos.length > 1
+    ? demos.map(d => `<button data-key="${esc(d.key)}">${esc(d.title)}</button>`).join("") : "";
+  $("tabs").querySelectorAll("button").forEach(b => b.onclick = () => show(b.dataset.key));
+  if (!demos.some(d => d.key === demo)) demo = demos[0].key;
+  refresh();
+  setInterval(refresh, 1500);
+})();
 </script>
 </body>
 </html>

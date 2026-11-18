@@ -40,7 +40,7 @@ AX_BIN="${AX_BIN:-ax}"
 ATESPACE="${ATESPACE:-default}"
 TASK_IMAGE="${AX_TASK_IMAGE:-}"
 
-ax() { "${AX_BIN}" -a "${ATESPACE}" "$@"; }
+ax() { command "${AX_BIN}" -a "${ATESPACE}" "$@"; }
 
 # The tree: "name parent goal", parents before children.
 TREE=(
@@ -218,6 +218,7 @@ case "${1:-}" in
   down)  down ;;
   tree)  print_tree "$(name_of "${TREE[0]}")" ;;
   manifest) manifest ;;
+  about) printf 'Task tree\tEach box is a sandboxed AX Task. Pick one and steer it: the message reaches that task and every task below it.\n' ;;
   nodes) for row in "${TREE[@]}"; do
            printf '%s\t%s\t%s\n' "$(name_of "$row")" "$(parent_of "$row")" "$(goal_of "$row")"
          done ;;

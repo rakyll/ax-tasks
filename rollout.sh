@@ -64,7 +64,7 @@ TO="${ROLLOUT_TO:-v1.42}"
 TICK="${ROLLOUT_TICK:-2}"
 FAIL="${ROLLOUT_FAIL-validate}"
 
-ax() { "${AX_BIN}" -a "${ATESPACE}" "$@"; }
+ax() { command "${AX_BIN}" -a "${ATESPACE}" "$@"; }
 
 # The tree: "name parents kind scope", parents before children. A stage with
 # several parents (comma-separated) starts once all of them are DONE.
@@ -504,6 +504,7 @@ case "${1:-}" in
   status)   status ;;
   down)     down ;;
   manifest) manifest ;;
+  about)    printf 'Staged rollout\tEach box is a sandboxed AX Task. Pick one and steer it: the message reaches that task and every task below it.\n' ;;
   nodes)    for row in "${TREE[@]}"; do
               printf '%s\t%s\t%s\t%s\n' "$(name_of "$row")" "$(parent_of "$row")" "$(goal_of "$row")" "$(kind_of "$row")"
             done ;;
